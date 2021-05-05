@@ -3,13 +3,13 @@ import asyncio
 from typing import Callable, List, Set
 from asyncio.tasks import Task
 from concurrent.futures import ThreadPoolExecutor
-from multiprocessing.pool import (
+from multiprocessing.pool import (  # noqa
     ExceptionWithTraceback,
     MaybeEncodingError,
     _helper_reraises_exception,
     Pool,
     mapstar,
-    starmapstar
+    starmapstar,
 )
 
 __all__ = ["AioPool"]
@@ -22,9 +22,10 @@ async def _fix_mapstar(sem, loop, func, args, kwds, iscoroutinefunction):
     results = []
     underlying_func = args[0][0]
     underlying_params = args[0][1]
+
     def release_sem(t: Task, sem=sem):
         sem.release()
-    
+
     if iscoroutinefunction(underlying_func):
         for coroutine in func(*args, **kwds):
             await sem.acquire()
@@ -32,7 +33,7 @@ async def _fix_mapstar(sem, loop, func, args, kwds, iscoroutinefunction):
             task.add_done_callback(release_sem)
             results.append(task)
     else:
-        for params in underlying_params: 
+        for params in underlying_params:
             await sem.acquire()
             if func is mapstar:
                 task = loop.run_in_executor(None, underlying_func, params)
@@ -51,7 +52,6 @@ async def task_wrapper(
     sem_concurrency_limit,
     wrap_exception: bool = False,
     iscoroutinefunction=asyncio.iscoroutinefunction,
-    
 ):
     job, i, func, args, kwds = task
     try:
@@ -61,10 +61,16 @@ async def task_wrapper(
         elif func in (mapstar, starmapstar):
             sem_concurrency_limit.release()
             try:
-                result = (True, await _fix_mapstar(
-                    sem_concurrency_limit, loop,
-                    func, args, kwds,
-                    iscoroutinefunction)
+                result = (
+                    True,
+                    await _fix_mapstar(
+                        sem_concurrency_limit,
+                        loop,
+                        func,
+                        args,
+                        kwds,
+                        iscoroutinefunction,
+                    ),
                 )
             finally:
                 await sem_concurrency_limit.acquire()
@@ -115,7 +121,7 @@ def worker(
         completed = 0
         sem_concurrency_limit = asyncio.Semaphore(concurrency_limit)
 
-        tasks: List[Task] = set()
+        tasks: Set[Task] = set()
 
         def release_sem(t: Task, sem=sem_concurrency_limit):
             sem.release()
@@ -144,7 +150,7 @@ def worker(
                     put=put,
                     loop=loop,
                     wrap_exception=wrap_exception,
-                    sem_concurrency_limit=sem_concurrency_limit
+                    sem_concurrency_limit=sem_concurrency_limit,
                 )
             )
             tasks.add(new_task)
