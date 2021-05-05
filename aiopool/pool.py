@@ -1,8 +1,10 @@
+from asyncio.base_events import BaseEventLoop
 import logging
 import asyncio
-from typing import Callable, List, Set
+from typing import Any, Callable, Deque, Dict, Iterable, List, Set
 from asyncio.tasks import Task
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from multiprocessing.pool import (  # noqa
     ExceptionWithTraceback,
     MaybeEncodingError,
@@ -18,12 +20,19 @@ __all__ = ["AioPool"]
 logger = logging.getLogger("aiopool")
 
 
-async def _fix_mapstar(sem, loop, func, args, kwds, iscoroutinefunction):
-    results = []
+async def _fix_mapstar(
+    sem: asyncio.Semaphore,
+    loop: BaseEventLoop,
+    func: Callable[..., Any],
+    args: Iterable[Any],
+    kwds: Dict[str, Any],
+    iscoroutinefunction: Callable[[Callable[..., Any]], bool],
+) -> List[Any]:
+    results = deque([])
     underlying_func = args[0][0]
     underlying_params = args[0][1]
 
-    def release_sem(t: Task, sem=sem):
+    def release_sem(t: Task, sem: asyncio.Semaphore = sem) -> None:
         sem.release()
 
     if iscoroutinefunction(underlying_func):
@@ -52,7 +61,7 @@ async def task_wrapper(
     sem_concurrency_limit,
     wrap_exception: bool = False,
     iscoroutinefunction=asyncio.iscoroutinefunction,
-):
+) -> None:
     job, i, func, args, kwds = task
     try:
 
@@ -102,7 +111,7 @@ def worker(
     maxtasks=None,
     wrap_exception=False,
     concurrency_limit=128,
-):
+) -> None:
     loop: asyncio.BaseEventLoop = loop_initializer()
     asyncio.set_event_loop(loop)
     worker_tp = ThreadPoolExecutor(threads, thread_name_prefix="Worker_TP_")
@@ -111,8 +120,10 @@ def worker(
     put_tp = ThreadPoolExecutor(1, thread_name_prefix="PutTask_TP_")
 
     async def run(
-        get=inqueue.get, put=outqueue.put, loop: asyncio.BaseEventLoop = loop
-    ):
+        get: Callable[..., None] = inqueue.get,
+        put: Callable[..., None] = outqueue.put,
+        loop: asyncio.BaseEventLoop = loop,
+    ) -> None:
         if initializer is not None:
             if asyncio.iscoroutinefunction(initializer):
                 await initializer(*initargs)
@@ -123,10 +134,10 @@ def worker(
 
         tasks: Set[Task] = set()
 
-        def release_sem(t: Task, sem=sem_concurrency_limit):
+        def release_sem(t: Task, sem=sem_concurrency_limit) -> None:
             sem.release()
 
-        def remove_task(t: Task, tasks: Set[Task] = tasks):
+        def remove_task(t: Task, tasks: Set[Task] = tasks) -> None:
             tasks.remove(t)
 
         while maxtasks is None or (maxtasks and completed < maxtasks):
@@ -174,13 +185,13 @@ class AioPool(Pool):
         loop_initializer=None,
         threadpool_size=1,
         concurrency_limit=128,
-    ):
+    ) -> None:
         self._loop_initializer = loop_initializer or asyncio.new_event_loop
         self._threadpool_size = threadpool_size
         self._concurrency_limit = concurrency_limit
         super().__init__(processes, initializer, initargs, maxtasksperchild, context)
 
-    def _repopulate_pool(self):
+    def _repopulate_pool(self) -> None:
         return self._repopulate_pool_static(
             self._ctx,
             self.Process,
@@ -212,7 +223,7 @@ class AioPool(Pool):
         wrap_exception,
         threadpool_size,
         concurrency_limit,
-    ):
+    ) -> None:
         """Bring the number of pool processes up to the specified number,
         for use after reaping workers which have exited.
         """
