@@ -1,6 +1,7 @@
 from asyncio.base_events import BaseEventLoop
 import logging
 import asyncio
+import sys
 from typing import Any, Callable, Deque, Dict, Iterable, List, Set
 from asyncio.tasks import Task
 from concurrent.futures import ThreadPoolExecutor
@@ -154,7 +155,7 @@ def worker(
                     logger.debug("worker got sentinel -- exiting")
                     break
             await sem_concurrency_limit.acquire()
-            new_task = asyncio.create_task(
+            new_task = loop.create_task(
                 task_wrapper(
                     task,
                     put_tp=put_tp,
@@ -191,60 +192,89 @@ class AioPool(Pool):
         self._concurrency_limit = concurrency_limit
         super().__init__(processes, initializer, initargs, maxtasksperchild, context)
 
-    def _repopulate_pool(self) -> None:
-        return self._repopulate_pool_static(
-            self._ctx,
-            self.Process,
-            self._processes,
-            self._pool,
-            self._inqueue,
-            self._outqueue,
-            self._initializer,
-            self._initargs,
-            self._loop_initializer,
-            self._maxtasksperchild,
-            self._wrap_exception,
-            self._threadpool_size,
-            self._concurrency_limit,
-        )
+    if sys.version_info.minor < 8:
 
-    @staticmethod
-    def _repopulate_pool_static(
-        ctx,
-        Process,
-        processes,
-        pool,
-        inqueue,
-        outqueue,
-        initializer,
-        initargs,
-        loop_initializer,
-        maxtasksperchild,
-        wrap_exception,
-        threadpool_size,
-        concurrency_limit,
-    ) -> None:
-        """Bring the number of pool processes up to the specified number,
-        for use after reaping workers which have exited.
-        """
-        for i in range(processes - len(pool)):
-            w = Process(
-                ctx,
-                target=worker,
-                args=(
-                    inqueue,
-                    outqueue,
-                    initializer,
-                    initargs,
-                    loop_initializer,
-                    threadpool_size,
-                    maxtasksperchild,
-                    wrap_exception,
-                    concurrency_limit,
-                ),
+        def _repopulate_pool(self):
+            """Bring the number of pool processes up to the specified number,
+            for use after reaping workers which have exited.
+            """
+            for i in range(self._processes - len(self._pool)):
+                w = self.Process(
+                    target=worker,
+                    args=(
+                        self._inqueue,
+                        self._outqueue,
+                        self._initializer,
+                        self._initargs,
+                        self._loop_initializer,
+                        self._threadpool_size,
+                        self._maxtasksperchild,
+                        self._wrap_exception,
+                        self._concurrency_limit,
+                    ),
+                )
+                self._pool.append(w)
+                w.name = w.name.replace("Process", "PoolWorker")
+                w.daemon = True
+                w.start()
+                logger.debug("added worker")
+
+    elif sys.version_info.minor >= 8:
+
+        def _repopulate_pool(self) -> None:
+            return self._repopulate_pool_static(
+                self._ctx,
+                self.Process,
+                self._processes,
+                self._pool,
+                self._inqueue,
+                self._outqueue,
+                self._initializer,
+                self._initargs,
+                self._loop_initializer,
+                self._maxtasksperchild,
+                self._wrap_exception,
+                self._threadpool_size,
+                self._concurrency_limit,
             )
-            w.name = w.name.replace("Process", "PoolWorker")
-            w.daemon = True
-            w.start()
-            pool.append(w)
-            logger.debug("added worker")
+
+        @staticmethod
+        def _repopulate_pool_static(
+            ctx,
+            Process,
+            processes,
+            pool,
+            inqueue,
+            outqueue,
+            initializer,
+            initargs,
+            loop_initializer,
+            maxtasksperchild,
+            wrap_exception,
+            threadpool_size,
+            concurrency_limit,
+        ) -> None:
+            """Bring the number of pool processes up to the specified number,
+            for use after reaping workers which have exited.
+            """
+            for i in range(processes - len(pool)):
+                w = Process(
+                    ctx,
+                    target=worker,
+                    args=(
+                        inqueue,
+                        outqueue,
+                        initializer,
+                        initargs,
+                        loop_initializer,
+                        threadpool_size,
+                        maxtasksperchild,
+                        wrap_exception,
+                        concurrency_limit,
+                    ),
+                )
+                w.name = w.name.replace("Process", "PoolWorker")
+                w.daemon = True
+                w.start()
+                pool.append(w)
+                logger.debug("added worker")
