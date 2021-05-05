@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "aiopool"
+version = "0.1.0"
+description = "Extending Python's process pool to support async functions."
+authors = ["Itay Azolay <itayazolay@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.6"
+
+[tool.poetry.dev-dependencies]
+uvloop = "^0.15.2"
+black = "^21.5b0"
+mypy = "^0.812"
+
+[build-system]
+requires = ["poetry>=0.12"]
+build-backend = "poetry.masonry.api"
