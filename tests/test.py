@@ -49,29 +49,33 @@ class TestAIOPool(unittest.TestCase):
         with AioPool(processes=2, concurrency_limit=2) as pool:
             inputs = [i for i in range(40)]
             expected = [i ** 2 for i in inputs]
-            result = pool.map(pow2_sync, inputs)
-            self.assertListEqual(expected, result)
+            for chunksize in [1, 2, 4]:
+                result = pool.map(pow2_sync, inputs, chunksize=chunksize)
+                self.assertListEqual(expected, result)
 
     def test_map_async(self):
         with AioPool(processes=2, concurrency_limit=2) as pool:
             inputs = [i for i in range(40)]
             expected = [i ** 2 for i in inputs]
-            result = pool.map(pow2_async, inputs)
-            self.assertListEqual(expected, result)
+            for chunksize in [1, 2, 4]:
+                result = pool.map(pow2_async, inputs, chunksize=chunksize)
+                self.assertListEqual(expected, result)
 
     def test_starmap_sync(self):
         with AioPool(processes=2, concurrency_limit=2) as pool:
             inputs = [(i, i // 2) for i in range(40)]
             expected = [mul_sync(a, b) for a, b in inputs]
-            result = pool.starmap(mul_sync, inputs)
-            self.assertListEqual(expected, result)
+            for chunksize in [1, 2, 4]:
+                result = pool.starmap(mul_sync, inputs, chunksize=chunksize)
+                self.assertListEqual(expected, result)
 
     def test_starmap_async(self):
         with AioPool(processes=2, concurrency_limit=2) as pool:
             inputs = [(i, i // 2) for i in range(40)]
             expected = [mul_sync(a, b) for a, b in inputs]
-            result = pool.starmap(mul_async, inputs)
-            self.assertListEqual(expected, result)
+            for chunksize in [1, 2, 4]:
+                result = pool.starmap(mul_async, inputs, chunksize=chunksize)
+                self.assertListEqual(expected, result)
 
 
 if __name__ == "__main__":

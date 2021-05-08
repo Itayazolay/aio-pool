@@ -168,11 +168,16 @@ def worker(
             tasks.add(new_task)
             new_task.add_done_callback(release_sem)
             new_task.add_done_callback(remove_task)
-
-        await asyncio.wait(tasks)
+        if tasks:
+            await asyncio.wait(tasks)
         logger.debug("worker exiting after %d tasks" % completed)
-
-    loop.run_until_complete(run())
+    try:
+        loop.run_until_complete(run())
+    except Exception as err:
+        logger.exception("worker got exception %s", err)
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
 
 
 class AioPool(Pool):
