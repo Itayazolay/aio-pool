@@ -1,4 +1,6 @@
 # aiopool
+Extending Python's `multiporcessing.Pool` to support coroutine functions.  
+Can be useful for when using a server with very high bandwidth or doing both very large IO and CPU tasks at the same time.   
 
 All methods of `multiprocessing.Pool` are supported.    
 All paramters for multiprocessing.Pool are supported.  
