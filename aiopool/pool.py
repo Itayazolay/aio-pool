@@ -2,7 +2,7 @@ from asyncio.base_events import BaseEventLoop
 import logging
 import asyncio
 import sys
-from typing import Any, Callable, Deque, Dict, Iterable, List, Set
+from typing import Any, Callable, Coroutine, Deque, Dict, Iterable, List, Set, Tuple, Union
 from asyncio.tasks import Task
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
@@ -33,7 +33,7 @@ async def _fix_mapstar(
     underlying_func = args[0][0]
     underlying_params = args[0][1]
 
-    def release_sem(t: Task, sem: asyncio.Semaphore = sem) -> None:
+    def release_sem(t: Task, *, sem: asyncio.Semaphore = sem) -> None:
         sem.release()
 
     if iscoroutinefunction(underlying_func):
@@ -56,7 +56,6 @@ async def _fix_mapstar(
 
 async def task_wrapper(
     task,
-    put_tp: ThreadPoolExecutor,
     put: Callable[..., None],
     loop: asyncio.BaseEventLoop,
     sem_concurrency_limit,
@@ -69,6 +68,11 @@ async def task_wrapper(
         if iscoroutinefunction(func):
             result = (True, await func(*args, **kwds))
         elif func in (mapstar, starmapstar):
+            # with mapstar/starmapstar we get a bunch of tasks to execute.
+            # In correctly handle the semaphore, we release the current 'task', 
+            # and acquire it once per each task we got in the mapstar/starmapstar.
+            # Then, we acquire the lock again, send the result back and the 
+            # semaphore is released above correctly.
             sem_concurrency_limit.release()
             try:
                 result = (
@@ -95,11 +99,11 @@ async def task_wrapper(
             e = ExceptionWithTraceback(e, e.__traceback__)
         result = (False, e)
     try:
-        await loop.run_in_executor(put_tp, lambda: put((job, i, result)))
+        await put((job, i, result))
     except Exception as e:
         wrapped = MaybeEncodingError(e, result[1])
         logger.debug("Possible encoding error while sending result: %s" % (wrapped))
-        await loop.run_in_executor(put_tp, lambda: put((job, i, (False, wrapped))))
+        await put((job, i, (False, wrapped)))
 
 
 def worker(
@@ -120,9 +124,15 @@ def worker(
     get_tp = ThreadPoolExecutor(1, thread_name_prefix="GetTask_TP_")
     put_tp = ThreadPoolExecutor(1, thread_name_prefix="PutTask_TP_")
 
+    async def get_task(loop=loop, tp=get_tp, queue=inqueue) -> tuple:
+        return await loop.run_in_executor(tp, queue.get)
+
+    async def put_result(result, *, loop=loop, tp=put_tp, queue=outqueue) -> None:
+        return await loop.run_in_executor(tp, queue.put, result)
+        
     async def run(
-        get: Callable[..., None] = inqueue.get,
-        put: Callable[..., None] = outqueue.put,
+        get: Callable[..., None] = get_task,
+        put: Callable[..., None] = put_result,
         loop: asyncio.BaseEventLoop = loop,
     ) -> None:
         if initializer is not None:
@@ -135,16 +145,16 @@ def worker(
 
         tasks: Set[Task] = set()
 
-        def release_sem(t: Task, sem=sem_concurrency_limit) -> None:
+        def release_sem(t: Task, *, sem=sem_concurrency_limit) -> None:
             sem.release()
 
-        def remove_task(t: Task, tasks: Set[Task] = tasks) -> None:
+        def remove_task(t: Task, *, tasks: Set[Task] = tasks) -> None:
             tasks.remove(t)
 
         while maxtasks is None or (maxtasks and completed < maxtasks):
             async with sem_concurrency_limit:
                 try:
-                    task = await loop.run_in_executor(get_tp, get)
+                    task = await get()
                 except (EOFError, OSError):
                     logger.debug("worker got EOFError or OSError -- exiting")
                     for task in tasks:
@@ -158,7 +168,6 @@ def worker(
             new_task = loop.create_task(
                 task_wrapper(
                     task,
-                    put_tp=put_tp,
                     put=put,
                     loop=loop,
                     wrap_exception=wrap_exception,
@@ -183,17 +192,36 @@ def worker(
 class AioPool(Pool):
     def __init__(
         self,
-        processes=None,
-        initializer=None,
-        initargs=(),
-        maxtasksperchild=None,
+        processes: int=None,
+        initializer: Union[Coroutine, Callable]=None,
+        initargs: Tuple[Any, ...]=(),
+        maxtasksperchild: int=None,
         context=None,
         loop_initializer=None,
         threadpool_size=1,
         concurrency_limit=128,
     ) -> None:
+        """Process pool implementation that support async functions.
+        Support the same funcitonalilty as the original process pool.
+
+        Args:
+            processes (int, optional): number of processes to run, same behaviour as Pool. 
+                Defaults to None.
+            initializer (Callable|Coroutine, optional): Initializer function that being executed first by each process.
+                Can be async. Defaults to None.
+            initargs (tuple, optional): Arguments to pass to initializer. Defaults to ().
+            maxtasksperchild (int, optional): max tasks per process. same behaviour as Pool. Defaults to None.
+            context (optional): determine how to start the child processes. same behaviour as Pool. Defaults to None.
+            loop_initializer (Callable, optional): Function that create the new event loop. Defaults to None.
+            threadpool_size (int, optional): size for the default threadpool for the event loop in the new process. Defaults to 1.
+            concurrency_limit (int, optional): Maximume concurrent tasks to run in each process. Defaults to 128.
+        """
         self._loop_initializer = loop_initializer or asyncio.new_event_loop
+        if threadpool_size <= 0:
+            raise ValueError("Thread pool size must be at least 1")
         self._threadpool_size = threadpool_size
+        if concurrency_limit < 1:
+            raise ValueError("Conccurency limit must be at least 1.")
         self._concurrency_limit = concurrency_limit
         super().__init__(processes, initializer, initargs, maxtasksperchild, context)
 
