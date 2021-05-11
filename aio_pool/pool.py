@@ -29,7 +29,7 @@ __all__ = ["AioPool"]
 
 
 logger = logging.getLogger("aiopool")
-logger.addFilter(logging.NullHandler())
+logger.addHandler(logging.NullHandler())
 
 
 async def _fix_mapstar(
