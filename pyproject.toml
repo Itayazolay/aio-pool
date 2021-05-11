@@ -5,10 +5,10 @@ description = "Extending Python's process pool to support async functions."
 authors = ["Itay Azolay <itayazolay@gmail.com>"]
 
 [tool.poetry.dependencies]
-python = "^3.6"
+python = "^3.7"
 
 [tool.poetry.dev-dependencies]
-uvloop = "^0.15.2"
+uvloop = { version="^0.15.2", optional=true }
 black = "^21.5b0"
 mypy = "^0.812"
 
