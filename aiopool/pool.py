@@ -2,7 +2,17 @@ from asyncio.base_events import BaseEventLoop
 import logging
 import asyncio
 import sys
-from typing import Any, Callable, Coroutine, Deque, Dict, Iterable, List, Set, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Coroutine,
+    Dict,
+    Iterable,
+    List,
+    Set,
+    Tuple,
+    Union,
+)
 from asyncio.tasks import Task
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
@@ -19,6 +29,7 @@ __all__ = ["AioPool"]
 
 
 logger = logging.getLogger("aiopool")
+logger.addFilter(logging.NullHandler())
 
 
 async def _fix_mapstar(
@@ -33,23 +44,24 @@ async def _fix_mapstar(
     underlying_func = args[0][0]
     underlying_params = args[0][1]
 
-    def release_sem(t: Task, *, sem: asyncio.Semaphore = sem) -> None:
-        sem.release()
-
     if iscoroutinefunction(underlying_func):
         for coroutine in func(*args, **kwds):
-            await sem.acquire()
-            task = loop.create_task(coroutine)
-            task.add_done_callback(release_sem)
+            create_task = lambda: loop.create_task(coroutine)
+            task = await _create_bounded_task(create_task, sem)
             results.append(task)
     else:
         for params in underlying_params:
-            await sem.acquire()
+
             if func is mapstar:
-                task = loop.run_in_executor(None, underlying_func, params)
+                create_task = lambda: loop.run_in_executor(
+                    None, underlying_func, params
+                )
             else:
-                task = loop.run_in_executor(None, underlying_func, *params)
-            task.add_done_callback(release_sem)
+                create_task = lambda: loop.run_in_executor(
+                    None, underlying_func, *params
+                )
+
+            task = await _create_bounded_task(create_task, sem)
             results.append(task)
     return await asyncio.gather(*results)
 
@@ -69,9 +81,9 @@ async def task_wrapper(
             result = (True, await func(*args, **kwds))
         elif func in (mapstar, starmapstar):
             # with mapstar/starmapstar we get a bunch of tasks to execute.
-            # In correctly handle the semaphore, we release the current 'task', 
+            # In correctly handle the semaphore, we release the current 'task',
             # and acquire it once per each task we got in the mapstar/starmapstar.
-            # Then, we acquire the lock again, send the result back and the 
+            # Then, we acquire the lock again, send the result back and the
             # semaphore is released above correctly.
             sem_concurrency_limit.release()
             try:
@@ -106,6 +118,70 @@ async def task_wrapper(
         await put((job, i, (False, wrapped)))
 
 
+async def _create_bounded_task(
+    create_task: Callable[[None], Task], sem: asyncio.Semaphore
+):
+    await sem.acquire()
+    task = create_task()
+    task.add_done_callback(lambda t: sem.release())
+    return task
+
+
+async def _run_worker(
+    get: Callable[..., None],
+    put: Callable[..., None],
+    loop: asyncio.BaseEventLoop,
+    initializer=None,
+    initargs=(),
+    maxtasks=None,
+    wrap_exception=False,
+    concurrency_limit=128,
+    iscoroutinefunction=asyncio.iscoroutinefunction,
+) -> None:
+    if initializer is not None:
+        if iscoroutinefunction(initializer):
+            await initializer(*initargs)
+        else:
+            initializer(*initargs)
+    completed = 0
+    sem_concurrency_limit = asyncio.Semaphore(concurrency_limit)
+
+    tasks: Set[Task] = set()
+
+    def remove_task(t: Task, *, tasks: Set[Task] = tasks) -> None:
+        tasks.remove(t)
+
+    while maxtasks is None or (maxtasks and completed < maxtasks):
+        async with sem_concurrency_limit:
+            try:
+                task = await get()
+            except (EOFError, OSError):
+                logger.debug("worker got EOFError or OSError -- exiting")
+                for task in tasks:
+                    task.cancel()
+                break
+
+            if task is None:
+                logger.debug("worker got sentinel -- exiting")
+                break
+
+        create_task = lambda: loop.create_task(
+            task_wrapper(
+                task,
+                put=put,
+                loop=loop,
+                wrap_exception=wrap_exception,
+                sem_concurrency_limit=sem_concurrency_limit,
+            )
+        )
+        new_task = await _create_bounded_task(create_task, sem_concurrency_limit)
+        tasks.add(new_task)
+        new_task.add_done_callback(remove_task)
+    if tasks:
+        await asyncio.wait(tasks)
+    logger.debug("worker exiting after %d tasks" % completed)
+
+
 def worker(
     inqueue,
     outqueue,
@@ -129,59 +205,20 @@ def worker(
 
     async def put_result(result, *, loop=loop, tp=put_tp, queue=outqueue) -> None:
         return await loop.run_in_executor(tp, queue.put, result)
-        
-    async def run(
-        get: Callable[..., None] = get_task,
-        put: Callable[..., None] = put_result,
-        loop: asyncio.BaseEventLoop = loop,
-    ) -> None:
-        if initializer is not None:
-            if asyncio.iscoroutinefunction(initializer):
-                await initializer(*initargs)
-            else:
-                initializer(*initargs)
-        completed = 0
-        sem_concurrency_limit = asyncio.Semaphore(concurrency_limit)
 
-        tasks: Set[Task] = set()
-
-        def release_sem(t: Task, *, sem=sem_concurrency_limit) -> None:
-            sem.release()
-
-        def remove_task(t: Task, *, tasks: Set[Task] = tasks) -> None:
-            tasks.remove(t)
-
-        while maxtasks is None or (maxtasks and completed < maxtasks):
-            async with sem_concurrency_limit:
-                try:
-                    task = await get()
-                except (EOFError, OSError):
-                    logger.debug("worker got EOFError or OSError -- exiting")
-                    for task in tasks:
-                        task.cancel()
-                    break
-
-                if task is None:
-                    logger.debug("worker got sentinel -- exiting")
-                    break
-            await sem_concurrency_limit.acquire()
-            new_task = loop.create_task(
-                task_wrapper(
-                    task,
-                    put=put,
-                    loop=loop,
-                    wrap_exception=wrap_exception,
-                    sem_concurrency_limit=sem_concurrency_limit,
-                )
-            )
-            tasks.add(new_task)
-            new_task.add_done_callback(release_sem)
-            new_task.add_done_callback(remove_task)
-        if tasks:
-            await asyncio.wait(tasks)
-        logger.debug("worker exiting after %d tasks" % completed)
     try:
-        loop.run_until_complete(run())
+        loop.run_until_complete(
+            _run_worker(
+                get_task,
+                put_result,
+                loop=loop,
+                initializer=initializer,
+                initargs=initargs,
+                maxtasks=maxtasks,
+                wrap_exception=wrap_exception,
+                concurrency_limit=concurrency_limit,
+            )
+        )
     except Exception as err:
         logger.exception("worker got exception %s", err)
     finally:
@@ -192,10 +229,10 @@ def worker(
 class AioPool(Pool):
     def __init__(
         self,
-        processes: int=None,
-        initializer: Union[Coroutine, Callable]=None,
-        initargs: Tuple[Any, ...]=(),
-        maxtasksperchild: int=None,
+        processes: int = None,
+        initializer: Union[Coroutine, Callable] = None,
+        initargs: Tuple[Any, ...] = (),
+        maxtasksperchild: int = None,
         context=None,
         loop_initializer=None,
         threadpool_size=1,
@@ -205,7 +242,7 @@ class AioPool(Pool):
         Support the same funcitonalilty as the original process pool.
 
         Args:
-            processes (int, optional): number of processes to run, same behaviour as Pool. 
+            processes (int, optional): number of processes to run, same behaviour as Pool.
                 Defaults to None.
             initializer (Callable|Coroutine, optional): Initializer function that being executed first by each process.
                 Can be async. Defaults to None.

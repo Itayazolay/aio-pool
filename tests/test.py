@@ -1,3 +1,5 @@
+import logging
+import os
 from aiopool import AioPool
 
 import unittest
@@ -32,6 +34,10 @@ async def mul_async(a, b):
 
 
 class TestAIOPool(unittest.TestCase):
+    def setUp(self) -> None:
+        logging.basicConfig(level=logging.DEBUG)
+        os.environ["PYTHONASYNCIODEBUG"] = "1"
+
     def test_initializer(self):
         param_val = True
         with AioPool(
