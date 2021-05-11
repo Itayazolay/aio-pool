@@ -1,6 +1,6 @@
 import logging
 import os
-from aiopool import AioPool
+from aio_pool import AioPool
 
 import unittest
 
