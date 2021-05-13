@@ -182,7 +182,7 @@ async def _run_worker(
         tasks.add(new_task)
         new_task.add_done_callback(remove_task)
     if tasks:
-        await asyncio.wait(tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
     logger.debug("worker exiting after %d tasks" % completed)
 
 
@@ -226,6 +226,9 @@ def worker(
     except Exception as err:
         logger.exception("worker got exception %s", err)
     finally:
+        get_tp.shutdown()
+        put_tp.shutdown()
+        worker_tp.shutdown()
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
 

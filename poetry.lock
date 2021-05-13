@@ -1,6 +1,7 @@
 [[package]]
 category = "dev"
 description = "Fast implementation of asyncio event loop on top of libuv"
+marker = "sys_platform != \"win32\""
 name = "uvloop"
 optional = true
 python-versions = "*"
@@ -12,7 +13,7 @@ docs = ["Sphinx (>=1.7.3,<1.8.0)", "sphinxcontrib-asyncio (>=0.2.0,<0.3.0)", "sp
 test = ["aiohttp", "flake8 (>=3.8.4,<3.9.0)", "psutil", "pycodestyle (>=2.6.0,<2.7.0)", "pyOpenSSL (>=19.0.0,<19.1.0)", "mypy (>=0.800)"]
 
 [metadata]
-content-hash = "703609927295e9e306f0e2a5e47e74adf2621a5d40468169f8fdb0cd4ab16752"
+content-hash = "1be6d5e3e834bf6445009a4401d0217c3f3c931eb889df997218f7c622f2d191"
 lock-version = "1.0"
 python-versions = "^3.6"
 
