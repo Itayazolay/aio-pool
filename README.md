@@ -1,4 +1,4 @@
-# aiopool
+# aio-pool
 Extending Python's `multiporcessing.Pool` to support coroutine functions.  
 Can be useful for when using a server with very high bandwidth or doing both very large IO and CPU tasks at the same time.   
 
@@ -9,7 +9,7 @@ All paramters for multiprocessing.Pool are supported.
 Setting concurrency limit. This means each process can run with up to 8 concurrent tasks at a time. 
 ```python
 import asyncio
-from aiopool import AioPool
+from aio_pool import AioPool
 
 
 async def powlong(a):
@@ -27,7 +27,7 @@ Async initliazers are also suppported.
 
 ```python
 import asyncio
-from aiopool import AioPool
+from aio_pool import AioPool
 
 async def start(message):
   await asyncio.sleep(1)
@@ -56,7 +56,7 @@ This means that order of execution is not guaranteed, even if the function is no
 However, the order of results is guaranteed through the pool API (map, starmap, apply, etc...).  
 
 ```python
-from aiopool import AioPool
+from aio_pool import AioPool
 import uvloop
 
 with AioPool(loop_initializer=uvloop.new_event_loop, threadpool_size=4) pool:

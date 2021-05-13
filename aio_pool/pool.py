@@ -1,14 +1,17 @@
 from asyncio.base_events import BaseEventLoop
+from asyncio.futures import Future
 import logging
 import asyncio
 import sys
 from typing import (
     Any,
     Callable,
-    Coroutine,
+    Awaitable,
+    Deque,
     Dict,
     Iterable,
     List,
+    Optional,
     Set,
     Tuple,
     Union,
@@ -16,14 +19,14 @@ from typing import (
 from asyncio.tasks import Task
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
-from multiprocessing.pool import (  # noqa
+from multiprocessing.pool import (   # type: ignore # noqa
     ExceptionWithTraceback,
     MaybeEncodingError,
     _helper_reraises_exception,
     Pool,
     mapstar,
     starmapstar,
-)
+) 
 
 __all__ = ["AioPool"]
 
@@ -36,14 +39,14 @@ async def _fix_mapstar(
     sem: asyncio.Semaphore,
     loop: BaseEventLoop,
     func: Callable[..., Any],
-    args: Iterable[Any],
+    args: Tuple[Tuple[Callable[..., Any], Iterable[Any]]],
     kwds: Dict[str, Any],
     iscoroutinefunction: Callable[[Callable[..., Any]], bool],
 ) -> List[Any]:
-    results = deque([])
+    results: Deque[Any] = deque([])
     underlying_func = args[0][0]
     underlying_params = args[0][1]
-
+    create_task: Callable[[], Union[Task[Any], Future[Any]]]
     if iscoroutinefunction(underlying_func):
         for coroutine in func(*args, **kwds):
             create_task = lambda: loop.create_task(coroutine)
@@ -68,7 +71,7 @@ async def _fix_mapstar(
 
 async def task_wrapper(
     task,
-    put: Callable[..., None],
+    put: Callable[[Any], Awaitable[None]],
     loop: asyncio.BaseEventLoop,
     sem_concurrency_limit,
     wrap_exception: bool = False,
@@ -119,7 +122,7 @@ async def task_wrapper(
 
 
 async def _create_bounded_task(
-    create_task: Callable[[None], Task], sem: asyncio.Semaphore
+    create_task: Callable[[], Union[Task, Future]], sem: asyncio.Semaphore
 ):
     await sem.acquire()
     task = create_task()
@@ -128,8 +131,8 @@ async def _create_bounded_task(
 
 
 async def _run_worker(
-    get: Callable[..., None],
-    put: Callable[..., None],
+    get: Callable[[], Awaitable[Any]],
+    put: Callable[[Any], Awaitable[None]],
     loop: asyncio.BaseEventLoop,
     initializer=None,
     initargs=(),
@@ -146,7 +149,7 @@ async def _run_worker(
     completed = 0
     sem_concurrency_limit = asyncio.Semaphore(concurrency_limit)
 
-    tasks: Set[Task] = set()
+    tasks: Set[Task[Any]] = set()
 
     def remove_task(t: Task, *, tasks: Set[Task] = tasks) -> None:
         tasks.remove(t)
@@ -159,6 +162,7 @@ async def _run_worker(
                 logger.debug("worker got EOFError or OSError -- exiting")
                 for task in tasks:
                     task.cancel()
+                tasks.clear()  # Don't wait for anything.
                 break
 
             if task is None:
@@ -189,8 +193,8 @@ def worker(
     initargs=(),
     loop_initializer=asyncio.new_event_loop,
     threads=1,
-    maxtasks=None,
-    wrap_exception=False,
+    maxtasks: Optional[int] = None,
+    wrap_exception: bool = False,
     concurrency_limit=128,
 ) -> None:
     loop: asyncio.BaseEventLoop = loop_initializer()
@@ -200,7 +204,7 @@ def worker(
     get_tp = ThreadPoolExecutor(1, thread_name_prefix="GetTask_TP_")
     put_tp = ThreadPoolExecutor(1, thread_name_prefix="PutTask_TP_")
 
-    async def get_task(loop=loop, tp=get_tp, queue=inqueue) -> tuple:
+    async def get_task(*, loop=loop, tp=get_tp, queue=inqueue) -> tuple:
         return await loop.run_in_executor(tp, queue.get)
 
     async def put_result(result, *, loop=loop, tp=put_tp, queue=outqueue) -> None:
@@ -229,29 +233,29 @@ def worker(
 class AioPool(Pool):
     def __init__(
         self,
-        processes: int = None,
-        initializer: Union[Coroutine, Callable] = None,
+        processes: Optional[int] = None,
+        initializer: Optional[Callable[..., Union[Awaitable[Any], Any]]] = None,
         initargs: Tuple[Any, ...] = (),
         maxtasksperchild: int = None,
         context=None,
-        loop_initializer=None,
-        threadpool_size=1,
-        concurrency_limit=128,
+        loop_initializer: Callable[[], BaseEventLoop] = None,
+        threadpool_size: int = 1,
+        concurrency_limit: int = 128,
     ) -> None:
         """Process pool implementation that support async functions.
         Support the same funcitonalilty as the original process pool.
 
         Args:
-            processes (int, optional): number of processes to run, same behaviour as Pool.
+            processes: number of processes to run, same behaviour as Pool.
                 Defaults to None.
-            initializer (Callable|Coroutine, optional): Initializer function that being executed first by each process.
-                Can be async. Defaults to None.
-            initargs (tuple, optional): Arguments to pass to initializer. Defaults to ().
-            maxtasksperchild (int, optional): max tasks per process. same behaviour as Pool. Defaults to None.
-            context (optional): determine how to start the child processes. same behaviour as Pool. Defaults to None.
-            loop_initializer (Callable, optional): Function that create the new event loop. Defaults to None.
-            threadpool_size (int, optional): size for the default threadpool for the event loop in the new process. Defaults to 1.
-            concurrency_limit (int, optional): Maximume concurrent tasks to run in each process. Defaults to 128.
+            initializer: Initializer function that being executed first by each process.
+                Can be async. Optional. Defaults to None.
+            initargs: Arguments to pass to initializer. Defaults to ().
+            maxtasksperchild: max tasks per process. same behaviour as Pool. Defaults to None.
+            context: determine how to start the child processes. same behaviour as Pool. Defaults to None.
+            loop_initializer: Function that create the new event loop. Defaults to None.
+            threadpool_size: size for the default threadpool for the event loop in the new process. Defaults to 1.
+            concurrency_limit: Maximume concurrent tasks to run in each process. Defaults to 128.
         """
         self._loop_initializer = loop_initializer or asyncio.new_event_loop
         if threadpool_size <= 0:
@@ -264,11 +268,11 @@ class AioPool(Pool):
 
     if sys.version_info.minor < 8:
 
-        def _repopulate_pool(self):
+        def _repopulate_pool(self) -> None:
             """Bring the number of pool processes up to the specified number,
             for use after reaping workers which have exited.
             """
-            for i in range(self._processes - len(self._pool)):
+            for _ in range(self._processes - len(self._pool)):
                 w = self.Process(
                     target=worker,
                     args=(
