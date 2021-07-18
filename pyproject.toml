@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "aio-pool"
-version = "0.1.2"
+version = "0.2.0"
 description = "Extending Python's process pool to support async functions."
 authors = ["Itay Azolay <itayazolay@gmail.com>"]
 license = "Apache-2.0"
