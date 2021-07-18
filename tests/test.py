@@ -1,6 +1,9 @@
 import logging
 import os
+import asyncio
+from concurrent.futures import ProcessPoolExecutor
 from aio_pool import AioPool
+
 
 import unittest
 
@@ -82,7 +85,6 @@ class TestAIOPool(unittest.TestCase):
             for chunksize in [1, 2, 4]:
                 result = pool.starmap(mul_async, inputs, chunksize=chunksize)
                 self.assertListEqual(expected, result)
-
-
+            
 if __name__ == "__main__":
     unittest.main()

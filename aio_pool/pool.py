@@ -1,32 +1,17 @@
-from asyncio.base_events import BaseEventLoop
-from asyncio.futures import Future
-import logging
 import asyncio
+import logging
 import sys
-from typing import (
-    Any,
-    Callable,
-    Awaitable,
-    Deque,
-    Dict,
-    Iterable,
-    List,
-    Optional,
-    Set,
-    Tuple,
-    Union,
-)
+from asyncio.base_events import BaseEventLoop
+from asyncio.coroutines import iscoroutinefunction
+from asyncio.locks import Semaphore
 from asyncio.tasks import Task
-from concurrent.futures import ThreadPoolExecutor
 from collections import deque
-from multiprocessing.pool import (   # type: ignore # noqa
-    ExceptionWithTraceback,
-    MaybeEncodingError,
-    _helper_reraises_exception,
-    Pool,
-    mapstar,
-    starmapstar,
-) 
+from concurrent.futures import ThreadPoolExecutor
+from functools import singledispatch
+from multiprocessing.pool import (  # type: ignore # noqa
+    ExceptionWithTraceback, MaybeEncodingError, Pool,
+    _helper_reraises_exception, mapstar, starmapstar)
+from typing import Any, Awaitable, Callable, Deque, Optional, Set, Tuple, Union
 
 __all__ = ["AioPool"]
 
@@ -35,80 +20,59 @@ logger = logging.getLogger("aiopool")
 logger.addHandler(logging.NullHandler())
 
 
-async def _fix_mapstar(
-    sem: asyncio.Semaphore,
-    loop: BaseEventLoop,
-    func: Callable[..., Any],
-    args: Tuple[Tuple[Callable[..., Any], Iterable[Any]]],
-    kwds: Dict[str, Any],
-    iscoroutinefunction: Callable[[Callable[..., Any]], bool],
-) -> List[Any]:
-    results: Deque[Any] = deque([])
+
+async def _create_bounded_task(func, args, kwds: dict, sem: Semaphore, loop: "BaseEventLoop", iscoroutinefunction=iscoroutinefunction):
+    if iscoroutinefunction(func):
+        task = await _create_bounded_task_coro(func, args, kwds, sem, loop)
+    elif func is mapstar:
+        task = await _create_bounded_task_mapstar(func, args, kwds, sem, loop)
+    elif func is starmapstar:
+        task = await _create_bounded_task_starmapstar(func, args, kwds, sem, loop)
+    else:
+        task = await _create_bounded_task_thread(func, args, kwds, sem, loop)
+    return task
+
+async def _create_bounded_task_thread(func, args, kwds: dict, sem, loop: "BaseEventLoop"):
+    await sem.acquire()
+    task = loop.run_in_executor(None, lambda: func(*args, **kwds))
+    task.add_done_callback(lambda t: sem.release())
+    return task
+
+async def _create_bounded_task_coro(func, args, kwds: dict, sem: Semaphore, loop: "BaseEventLoop"):
+    await sem.acquire()
+    task = loop.create_task(func(*args, **kwds))
+    task.add_done_callback(lambda t: sem.release())
+    return task
+    
+async def _create_bounded_task_mapstar(func: mapstar, args, kwds: dict, sem: Semaphore, loop: "BaseEventLoop"):
     underlying_func = args[0][0]
     underlying_params = args[0][1]
-    create_task: Callable[[], Union[Task[Any], Future[Any]]]
-    if iscoroutinefunction(underlying_func):
-        for coroutine in func(*args, **kwds):
-            create_task = lambda: loop.create_task(coroutine)
-            task = await _create_bounded_task(create_task, sem)
-            results.append(task)
-    else:
-        for params in underlying_params:
+    results: Deque[Awaitable[Any]] = deque([])
+    append = results.append
+    for params in underlying_params:
+        append(await _create_bounded_task(
+            underlying_func, (params, ), {}, sem, loop))
+    return asyncio.gather(*results, return_exceptions=True)
 
-            if func is mapstar:
-                create_task = lambda: loop.run_in_executor(
-                    None, underlying_func, params
-                )
-            else:
-                create_task = lambda: loop.run_in_executor(
-                    None, underlying_func, *params
-                )
-
-            task = await _create_bounded_task(create_task, sem)
-            results.append(task)
-    return await asyncio.gather(*results)
+async def _create_bounded_task_starmapstar(func: starmapstar, args, kwds: dict, sem: Semaphore, loop: "BaseEventLoop"):
+    underlying_func = args[0][0]
+    underlying_params = args[0][1]
+    results = deque([])
+    append = results.append
+    for params in underlying_params:
+        append(await _create_bounded_task(
+            underlying_func, params, {}, sem, loop))
+    return asyncio.gather(*results)
 
 
 async def task_wrapper(
-    task,
+    job, i, func,
+    task: Awaitable[Any],
     put: Callable[[Any], Awaitable[None]],
-    loop: asyncio.BaseEventLoop,
-    sem_concurrency_limit,
     wrap_exception: bool = False,
-    iscoroutinefunction=asyncio.iscoroutinefunction,
 ) -> None:
-    job, i, func, args, kwds = task
     try:
-
-        if iscoroutinefunction(func):
-            result = (True, await func(*args, **kwds))
-        elif func in (mapstar, starmapstar):
-            # with mapstar/starmapstar we get a bunch of tasks to execute.
-            # In correctly handle the semaphore, we release the current 'task',
-            # and acquire it once per each task we got in the mapstar/starmapstar.
-            # Then, we acquire the lock again, send the result back and the
-            # semaphore is released above correctly.
-            sem_concurrency_limit.release()
-            try:
-                result = (
-                    True,
-                    await _fix_mapstar(
-                        sem_concurrency_limit,
-                        loop,
-                        func,
-                        args,
-                        kwds,
-                        iscoroutinefunction,
-                    ),
-                )
-            finally:
-                await sem_concurrency_limit.acquire()
-        else:
-            result = (
-                True,
-                await loop.run_in_executor(None, lambda: func(*args, **kwds)),
-            )
-
+        result = (True, await task)
     except Exception as e:
         if wrap_exception and func is not _helper_reraises_exception:
             e = ExceptionWithTraceback(e, e.__traceback__)
@@ -119,15 +83,6 @@ async def task_wrapper(
         wrapped = MaybeEncodingError(e, result[1])
         logger.debug("Possible encoding error while sending result: %s" % (wrapped))
         await put((job, i, (False, wrapped)))
-
-
-async def _create_bounded_task(
-    create_task: Callable[[], Union[Task, Future]], sem: asyncio.Semaphore
-):
-    await sem.acquire()
-    task = create_task()
-    task.add_done_callback(lambda t: sem.release())
-    return task
 
 
 async def _run_worker(
@@ -147,7 +102,7 @@ async def _run_worker(
         else:
             initializer(*initargs)
     completed = 0
-    sem_concurrency_limit = asyncio.Semaphore(concurrency_limit)
+    sem_concurrency_limit = asyncio.BoundedSemaphore(concurrency_limit)
 
     tasks: Set[Task[Any]] = set()
 
@@ -168,19 +123,20 @@ async def _run_worker(
             if task is None:
                 logger.debug("worker got sentinel -- exiting")
                 break
+        
+        job, i, func, args, kwds = task
+        task = await _create_bounded_task(func, args, kwds, sem=sem_concurrency_limit, loop=loop)
 
-        create_task = lambda: loop.create_task(
-            task_wrapper(
+        new_task = loop.create_task(
+            task_wrapper(job, i, func,
                 task,
                 put=put,
-                loop=loop,
                 wrap_exception=wrap_exception,
-                sem_concurrency_limit=sem_concurrency_limit,
             )
         )
-        new_task = await _create_bounded_task(create_task, sem_concurrency_limit)
         tasks.add(new_task)
         new_task.add_done_callback(remove_task)
+
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     logger.debug("worker exiting after %d tasks" % completed)
@@ -226,11 +182,15 @@ def worker(
     except Exception as err:
         logger.exception("worker got exception %s", err)
     finally:
+        logger.debug("shutdown workers")
         get_tp.shutdown()
         put_tp.shutdown()
         worker_tp.shutdown()
+        logger.debug("shutdown asyncgens")
         loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.close()
+        if loop.is_running():
+            loop.close()
+        logger.debug("Worker done")
 
 
 class AioPool(Pool):
@@ -242,7 +202,7 @@ class AioPool(Pool):
         maxtasksperchild: int = None,
         context=None,
         loop_initializer: Callable[[], BaseEventLoop] = None,
-        threadpool_size: int = 1,
+        pool_size: int = 1,
         concurrency_limit: int = 128,
     ) -> None:
         """Process pool implementation that support async functions.
@@ -257,13 +217,13 @@ class AioPool(Pool):
             maxtasksperchild: max tasks per process. same behaviour as Pool. Defaults to None.
             context: determine how to start the child processes. same behaviour as Pool. Defaults to None.
             loop_initializer: Function that create the new event loop. Defaults to None.
-            threadpool_size: size for the default threadpool for the event loop in the new process. Defaults to 1.
+            pool_size: size for the default pool for the event loop in the new process. Defaults to 1.
             concurrency_limit: Maximume concurrent tasks to run in each process. Defaults to 128.
         """
         self._loop_initializer = loop_initializer or asyncio.new_event_loop
-        if threadpool_size <= 0:
+        if pool_size <= 0:
             raise ValueError("Thread pool size must be at least 1")
-        self._threadpool_size = threadpool_size
+        self._pool_size = pool_size
         if concurrency_limit < 1:
             raise ValueError("Conccurency limit must be at least 1.")
         self._concurrency_limit = concurrency_limit
@@ -284,7 +244,7 @@ class AioPool(Pool):
                         self._initializer,
                         self._initargs,
                         self._loop_initializer,
-                        self._threadpool_size,
+                        self._pool_size,
                         self._maxtasksperchild,
                         self._wrap_exception,
                         self._concurrency_limit,
@@ -311,7 +271,7 @@ class AioPool(Pool):
                 self._loop_initializer,
                 self._maxtasksperchild,
                 self._wrap_exception,
-                self._threadpool_size,
+                self._pool_size,
                 self._concurrency_limit,
             )
 
@@ -328,7 +288,7 @@ class AioPool(Pool):
             loop_initializer,
             maxtasksperchild,
             wrap_exception,
-            threadpool_size,
+            pool_size,
             concurrency_limit,
         ) -> None:
             """Bring the number of pool processes up to the specified number,
@@ -344,7 +304,7 @@ class AioPool(Pool):
                         initializer,
                         initargs,
                         loop_initializer,
-                        threadpool_size,
+                        pool_size,
                         maxtasksperchild,
                         wrap_exception,
                         concurrency_limit,
