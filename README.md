@@ -5,6 +5,10 @@ Can be useful for when using a server with very high bandwidth or doing both ver
 All methods of `multiprocessing.Pool` are supported.    
 All paramters for multiprocessing.Pool are supported.  
 
+Install using pip:
+```bash
+pip install aio-pool
+```
 ## examples:
 Setting concurrency limit. This means each process can run with up to 8 concurrent tasks at a time. 
 ```python
